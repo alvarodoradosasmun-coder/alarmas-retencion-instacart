@@ -124,7 +124,7 @@ Notebook: `04_modelo`.
 | Gradient boosting (HistGradientBoosting) | **0.8184** | **0.3450** | 0.2038 | 30.1% | 63.1% |
 | Regresión logística | 0.8130 | 0.3311 | 0.1810 | 29.6% | 64.2% |
 
-El AUC-PR del modelo ganador es tres veces el de un modelo al azar (0.115). Con el umbral de 0.2038, el sistema detecta 63 de cada 100 clientes que se van a enfriar, y 30 de cada 100 alertas son correctas. Para una alarma temprana es un balance razonable: es preferible avisar de más que dejar pasar casos.
+El AUC-PR del modelo ganador es tres veces el de un modelo al azar (0.115). Con el umbral de 0.2038, el sistema detecta 63 de cada 100 casos en que el cliente se enfrió, y 30 de cada 100 alertas son correctas. Para una alarma temprana es un balance razonable: es preferible avisar de más que dejar pasar casos.
 
 El modelo ganador se registró en Unity Catalog como `workspace.gold.modelo_riesgo` con el alias `champion`.
 
