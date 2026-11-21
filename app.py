@@ -1,4 +1,5 @@
 import os
+import concurrent.futures as cf
 import streamlit as st
 from databricks import sql
 from databricks.sdk import WorkspaceClient
@@ -10,6 +11,7 @@ w = WorkspaceClient()
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
 ENDPOINT = os.getenv("SERVING_ENDPOINT")
 UMBRAL = 0.2038
+ESPERA_MAX = 20  # segundos que se espera al endpoint
 
 FEATURES = [
     "order_number", "mes_vida", "order_dow", "order_hour_of_day",
@@ -21,6 +23,9 @@ FEATURES = [
 
 ICONO = {"Alarma": "🔴 Alarma", "Vigilar": "🟡 Vigilar", "Sana": "🟢 Sana"}
 SEGMENTOS = {"chica": "Chica (≤6 productos)", "mediana": "Mediana (7 a 12)", "grande": "Grande (>12)"}
+
+# Hilo aparte para poder cortar la espera al endpoint
+EJECUTOR = cf.ThreadPoolExecutor(max_workers=2)
 
 
 def consulta(query, params=None):
@@ -37,6 +42,35 @@ def consulta(query, params=None):
 @st.cache_data(ttl=600)
 def cargar_cohortes():
     return consulta("SELECT * FROM workspace.gold.cohortes")
+
+
+def consultar_endpoint(entrada):
+    """Consulta el modelo publicado con tiempo de espera y valida la respuesta."""
+    futuro = EJECUTOR.submit(
+        w.serving_endpoints.query,
+        name=ENDPOINT,
+        dataframe_records=entrada.to_dict(orient="records"),
+    )
+    resp = futuro.result(timeout=ESPERA_MAX)
+
+    pred = resp.predictions
+    if not isinstance(pred, list) or len(pred) != 1:
+        raise ValueError("la respuesta no trae una predicción")
+    fila = pred[0]
+    if not isinstance(fila, (list, tuple)) or len(fila) != 2:
+        raise ValueError("la respuesta no trae dos probabilidades")
+    prob = float(fila[1])
+    if not 0.0 <= prob <= 1.0:
+        raise ValueError("la probabilidad está fuera de 0 a 1")
+    return prob
+
+
+def prob_en_lote(uid):
+    r = consulta(
+        "SELECT prob_riesgo FROM workspace.gold.clientes_estado_actual WHERE user_id = :uid",
+        {"uid": int(uid)},
+    )
+    return float(r["prob_riesgo"].iloc[0])
 
 
 def etiqueta_mes(m):
@@ -67,15 +101,23 @@ if consultar:
         )
 
         if datos.empty:
-            st.error("No se encontró ese cliente.")
+            st.error("No se encontró ese cliente. Prueba con un ID del 1 al 206,209.")
             st.stop()
 
         entrada = datos[FEATURES].astype(float)
-        resp = w.serving_endpoints.query(
-            name=ENDPOINT,
-            dataframe_records=entrada.to_dict(orient="records"),
-        )
-        prob = float(resp.predictions[0][1])
+
+        try:
+            prob = consultar_endpoint(entrada)
+            fuente = "modelo publicado (endpoint)"
+        except cf.TimeoutError:
+            prob = prob_en_lote(uid)
+            fuente = f"cálculo en lote: el endpoint tardó más de {ESPERA_MAX} segundos"
+        except ValueError as e:
+            prob = prob_en_lote(uid)
+            fuente = f"cálculo en lote: respuesta inválida del endpoint ({e})"
+        except Exception:
+            prob = prob_en_lote(uid)
+            fuente = "cálculo en lote: el endpoint no está disponible"
 
     d = datos.iloc[0]
     cohorte = coh[(coh["mes_vida_grupo"] == d["mes_vida_grupo"]) &
@@ -85,6 +127,7 @@ if consultar:
 
     with c2:
         st.subheader(f"Cliente {int(uid)}: {clasif}")
+        st.caption(f"Fuente de la probabilidad: {fuente}")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Prob. de tardar 30+ días", f"{prob:.1%}")
         k2.metric("Mes de vida", etiqueta_mes(d["mes_vida_grupo"]))

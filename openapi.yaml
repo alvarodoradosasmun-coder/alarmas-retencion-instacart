@@ -1,0 +1,109 @@
+openapi: 3.0.3
+info:
+  title: API del modelo de riesgo de retención (Instacart)
+  version: "1.0"
+  description: >
+    Endpoint de Databricks Model Serving que expone el modelo
+    workspace.gold.modelo_riesgo (gradient boosting, alias champion).
+    Recibe las 17 variables del último pedido de un cliente y regresa la
+    probabilidad de que tarde 30 días o más en hacer su siguiente pedido.
+    Umbral de riesgo alto: 0.2038.
+servers:
+  - url: https://{host}/serving-endpoints/riesgo-instacart
+    variables:
+      host:
+        default: tu-workspace.cloud.databricks.com
+        description: Host del workspace de Databricks
+security:
+  - bearerAuth: []
+paths:
+  /invocations:
+    post:
+      summary: Calcular la probabilidad de riesgo de uno o varios pedidos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Peticion"
+      responses:
+        "200":
+          description: Probabilidades calculadas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Respuesta"
+        "400":
+          description: Entrada inválida (falta una columna o un valor no es numérico)
+        "401":
+          description: Token ausente o inválido
+        "404":
+          description: El endpoint no existe
+        "503":
+          description: El endpoint está arrancando (scale to zero); reintentar
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Peticion:
+      type: object
+      required: [dataframe_records]
+      properties:
+        dataframe_records:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Pedido"
+    Pedido:
+      type: object
+      required:
+        - order_number
+        - mes_vida
+        - order_dow
+        - order_hour_of_day
+        - dias_acumulados
+        - days_since_prior_order
+        - gap_promedio
+        - gap_std
+        - gap_max
+        - n_gaps_30
+        - basket_size
+        - canasta_promedio
+        - n_departments
+        - reorden_ratio_pedido
+        - reorden_ratio_hist
+        - es_primer_pedido
+        - canasta_inicial
+      properties:
+        order_number: {type: number, minimum: 1, description: Número de pedido del cliente}
+        mes_vida: {type: number, minimum: 1, description: Mes de vida desde la primera compra}
+        order_dow: {type: number, minimum: 0, maximum: 6, description: Día de la semana del pedido}
+        order_hour_of_day: {type: number, minimum: 0, maximum: 23, description: Hora del pedido}
+        dias_acumulados: {type: number, minimum: 0, description: Días desde la primera compra}
+        days_since_prior_order: {type: number, minimum: 0, maximum: 30, description: Días desde el pedido anterior (0 en el primer pedido)}
+        gap_promedio: {type: number, minimum: 0, maximum: 30, description: Promedio de días entre pedidos}
+        gap_std: {type: number, minimum: 0, description: Desviación estándar de los días entre pedidos}
+        gap_max: {type: number, minimum: 0, maximum: 30, description: Máximo de días entre pedidos}
+        n_gaps_30: {type: number, minimum: 0, description: Veces que el cliente tardó 30 días o más}
+        basket_size: {type: number, minimum: 1, description: Productos en el pedido}
+        canasta_promedio: {type: number, minimum: 1, description: Productos por pedido en promedio}
+        n_departments: {type: number, minimum: 1, description: Departamentos distintos en el pedido}
+        reorden_ratio_pedido: {type: number, minimum: 0, maximum: 1, description: Proporción de productos recomprados en el pedido}
+        reorden_ratio_hist: {type: number, minimum: 0, maximum: 1, description: Proporción de productos recomprados en el historial}
+        es_primer_pedido: {type: number, enum: [0, 1], description: 1 si es el primer pedido}
+        canasta_inicial: {type: number, minimum: 1, description: Productos en el primer pedido}
+    Respuesta:
+      type: object
+      properties:
+        predictions:
+          type: array
+          description: Una fila por pedido con [probabilidad de no riesgo, probabilidad de riesgo]
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: {type: number, minimum: 0, maximum: 1}
+      example:
+        predictions: [[0.7051, 0.2949]]

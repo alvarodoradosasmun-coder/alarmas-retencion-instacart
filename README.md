@@ -94,6 +94,18 @@ Notebook: `03_gold`. Genera `gold.features_pedido` con un renglón por pedido de
 
 La columna que mira al pedido siguiente se usa solo para construir la etiqueta y se elimina antes de guardar la tabla.
 
+### Decisiones de limpieza y transformación
+
+| Tema | Qué se hizo | Por qué |
+|---|---|---|
+| Tipos de dato | Bronze guarda todo como texto; Silver convierte cada columna a entero o decimal. | Bronze conserva el dato original sin riesgo de perder valores al leer. La conversión se hace una sola vez, en un lugar controlado. |
+| Duplicados | `dropDuplicates` por `order_id` en pedidos, por `product_id` en productos y por `(order_id, product_id)` en el detalle. | Cada llave debe aparecer una sola vez; un duplicado contaría dos veces el mismo pedido o producto. |
+| Nulos en llaves | Se eliminan pedidos sin `order_id` o sin `user_id`. | Sin llave no se puede saber a qué cliente pertenece el pedido. |
+| Nulos esperados | El primer pedido de cada cliente no tiene días previos, y la desviación estándar no existe con menos de dos intervalos. Se rellenan con 0 y se agrega la variable `es_primer_pedido`. | No son errores sino casos donde el valor no existe. El indicador le avisa al modelo que el 0 tiene ese significado. |
+| Valores extremos | No se eliminaron. Los días entre pedidos ya vienen con tope en 30 desde la fuente, y el mes de vida se agrupa en "7 o más". | Las canastas muy grandes o los clientes muy antiguos son comportamientos reales, no errores de captura. El gradient boosting divide por rangos y no se distorsiona con valores extremos. |
+| Normalización | `StandardScaler` dentro del pipeline de la regresión logística. El gradient boosting no la necesita. | La regresión logística es sensible a la escala de las variables; los árboles no. |
+| Codificación | No se requirió codificación categórica: todas las variables del modelo son numéricas. El segmento de canasta (texto) solo se usa para agrupar cohortes; al modelo entra la versión numérica, `canasta_inicial`. | Evita crear columnas de más y mantiene la misma información. |
+
 ## Cohortes
 
 Una cohorte es la combinación de dos dimensiones:
@@ -117,7 +129,8 @@ Notebook: `04_modelo`.
 
 - **Muestra.** Se entrena con el 40% de los clientes (1,287,729 renglones), elegidos por hash del `user_id`. Spark procesa los 37 millones de registros; la muestra se usa solo para entrenar en memoria con scikit-learn.
 - **Separación.** 80% entrenamiento y 20% prueba, por cliente (`GroupShuffleSplit`). Ningún cliente aparece en los dos conjuntos.
-- **Métricas.** Como solo el 11.5% de los casos son positivos, la exactitud no sirve. Se usan AUC-ROC, AUC-PR y el umbral que maximiza F1.
+- **Tipo de tarea.** Clasificación binaria: 1 si el cliente tarda 30 días o más en volver, 0 si vuelve antes.
+- **Métricas.** Las clases están desbalanceadas (solo el 11.5% de los casos son positivos), así que la exactitud no sirve: un modelo que siempre dijera "no hay riesgo" acertaría el 88.5%. La **métrica principal es AUC-PR**, que se enfoca en la clase minoritaria. El umbral de decisión se eligió maximizando **F1**, para equilibrar precisión y recall. AUC-ROC se reporta como complemento.
 
 | Modelo | AUC-ROC | AUC-PR | Umbral F1 | Precisión | Recall |
 |---|---:|---:|---:|---:|---:|
@@ -180,10 +193,49 @@ Probabilidad (endpoint): 0.2949
 Probabilidad (lote):     0.2949
 ```
 
+### API del modelo
+
+La especificación completa está en `openapi.yaml` (OpenAPI 3.0).
+
+- **Método y ruta:** `POST https://<host-del-workspace>/serving-endpoints/riesgo-instacart/invocations`
+- **Autenticación:** `Authorization: Bearer <token de Databricks>`
+- **Validación de entradas:** el modelo se registró con firma de MLflow (17 columnas numéricas). El endpoint rechaza una petición si falta una columna o si un valor no es numérico.
+
+Petición:
+
+```json
+{
+  "dataframe_records": [{
+    "order_number": 10, "mes_vida": 6, "order_dow": 4, "order_hour_of_day": 8,
+    "dias_acumulados": 176, "days_since_prior_order": 30, "gap_promedio": 19.6,
+    "gap_std": 9.2, "gap_max": 30, "n_gaps_30": 2, "basket_size": 9,
+    "canasta_promedio": 5.9, "n_departments": 4, "reorden_ratio_pedido": 0.67,
+    "reorden_ratio_hist": 0.69, "es_primer_pedido": 0, "canasta_inicial": 5
+  }]
+}
+```
+
+Respuesta (probabilidad de "no riesgo" y de "riesgo"):
+
+```json
+{ "predictions": [[0.7051, 0.2949]] }
+```
+
+Los valores de la petición son ilustrativos del formato.
+
+### App
+
 La capa de resultados es una app de Streamlit en Databricks Apps, en una sola pantalla:
 
 - **Consulta de un cliente.** Se escribe un `user_id`, la app busca las variables de su último pedido en `gold.features_pedido`, las envía al endpoint y muestra la probabilidad, la clasificación (riesgo alto o bajo) y el semáforo de su cohorte.
 - **Semáforo de cohortes.** Tabla con las 21 cohortes (7 meses de vida por 3 segmentos).
+
+La app consume el endpoint publicado; no tiene una copia local del modelo. Manejo de errores:
+
+- **Entradas:** el campo solo acepta enteros del 1 al 206,209, y la consulta a la base va parametrizada.
+- **Tiempo de espera:** si el endpoint no responde en 20 segundos, la app deja de esperar.
+- **Respuestas inválidas:** se revisa que la respuesta traiga dos probabilidades y que estén entre 0 y 1.
+- **Respaldo:** ante cualquiera de esos fallos, la app muestra la probabilidad del cálculo en lote (el mismo modelo, ya calculada en `gold.clientes_estado_actual`) y dice en pantalla por qué no usó el endpoint.
 
 ![App](app.png)
 
@@ -244,4 +296,5 @@ En los pedidos normales el modelo está calibrado. En el último pedido subestim
 | `README.md` | Esta documentación |
 | `01_bronze.py` a `05_scoring.py` | Notebooks de Databricks exportados como código fuente |
 | `app.py`, `app.yaml`, `requirements.txt` | App de Streamlit para Databricks Apps |
+| `openapi.yaml` | Documentación de la API del modelo publicado |
 | `app.png`, `job.png` | Capturas de la app y del Job |
